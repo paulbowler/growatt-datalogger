@@ -17,6 +17,7 @@ the sort of thing someone builds an automation on.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -44,6 +45,16 @@ _SCHEDULE_ENABLE_REGISTERS = {
     1105,
     1108,
 }
+
+_READ_GROUPS = (
+    (1070, 1071),
+    (1080, 1088),
+    (1090, 1092),
+    (1100, 1108),
+)
+_READ_GROUP_TASKS: dict[
+    tuple[int, str, int, int], asyncio.Task[dict[int, int]]
+] = {}
 
 
 def async_setup_write_platform(
@@ -164,18 +175,14 @@ class GrowattWriteEntity(GrowattEntity):
             self._refresh_requested = False
             return
         try:
-            response = await session.send_command(
-                commands.read_inverter(
-                    session.datalogger_serial, session.protocol, self.spec.register
-                )
-            )
+            word = await self._async_read_register_word(session)
         except (CommandTimeout, ConnectionError) as err:
             _LOGGER.debug("could not read %s: %s", self.spec.key, err)
             return
         finally:
             self._refresh_requested = False
 
-        if response.empty or response.value is None:
+        if word is None:
             # The device does not implement this register. Better an unknown value than
             # a plausible-looking wrong one.
             _LOGGER.debug(
@@ -184,8 +191,23 @@ class GrowattWriteEntity(GrowattEntity):
             self._refresh_gave_empty_response = True
             return
 
-        self._current = self.spec.decode(int(response.value))
+        self._current = self.spec.decode(word)
         self.async_write_ha_state()
+
+    async def _async_read_register_word(self, session: Any) -> int | None:
+        if group := _read_group_for(self.spec.register):
+            values = await _async_read_group_cached(session, *group)
+            if self.spec.register in values:
+                return values[self.spec.register]
+
+        response = await session.send_command(
+            commands.read_inverter(
+                session.datalogger_serial, session.protocol, self.spec.register
+            )
+        )
+        if response.empty or response.value is None:
+            return None
+        return int(response.value)
 
     async def _async_write(self, value: Any) -> None:
         """Write ``value``, then read the register back to confirm."""
@@ -252,3 +274,33 @@ class GrowattWriteEntity(GrowattEntity):
         if parent is None:
             return None
         return self.hub.session_for(self.hub.devices[parent].serial)
+
+
+def _read_group_for(register: int) -> tuple[int, int] | None:
+    for start, end in _READ_GROUPS:
+        if start <= register <= end:
+            return start, end
+    return None
+
+
+async def _async_read_group_cached(session: Any, start: int, end: int) -> dict[int, int]:
+    key = (id(session), session.datalogger_serial, start, end)
+    task = _READ_GROUP_TASKS.get(key)
+    if task is None or task.done():
+        task = asyncio.create_task(_async_read_group(session, start, end))
+        _READ_GROUP_TASKS[key] = task
+
+    try:
+        return await task
+    finally:
+        if task.done() and _READ_GROUP_TASKS.get(key) is task:
+            _READ_GROUP_TASKS.pop(key, None)
+
+
+async def _async_read_group(session: Any, start: int, end: int) -> dict[int, int]:
+    response = await session.send_command(
+        commands.read_inverter(session.datalogger_serial, session.protocol, start, end)
+    )
+    if response.empty:
+        return {}
+    return {start + index: value for index, value in enumerate(response.values)}
