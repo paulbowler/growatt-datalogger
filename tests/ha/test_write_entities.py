@@ -81,6 +81,56 @@ def test_a_storage_profile_gets_the_battery_registers() -> None:
     assert "charge_priority" in keys
 
 
+def test_a_storage_profile_gets_complete_sph_schedule_registers() -> None:
+    specs = {spec.key: spec for spec in for_profile("storage_3000")}
+
+    expected = {
+        "charge_priority": 1044,
+        "grid_first_discharge_power_limit": 1070,
+        "grid_first_stop_soc": 1071,
+        "grid_first_start_time_1": 1080,
+        "grid_first_stop_time_1": 1081,
+        "grid_first_enabled_1": 1082,
+        "grid_first_start_time_2": 1083,
+        "grid_first_stop_time_2": 1084,
+        "grid_first_enabled_2": 1085,
+        "grid_first_start_time_3": 1086,
+        "grid_first_stop_time_3": 1087,
+        "grid_first_enabled_3": 1088,
+        "battery_charge_power_limit": 1090,
+        "battery_first_stop_soc": 1091,
+        "ac_charge_enabled": 1092,
+        "battery_first_start_time": 1100,
+        "battery_first_stop_time": 1101,
+        "battery_first_enabled_1": 1102,
+        "battery_first_start_time_2": 1103,
+        "battery_first_stop_time_2": 1104,
+        "battery_first_enabled_2": 1105,
+        "battery_first_start_time_3": 1106,
+        "battery_first_stop_time_3": 1107,
+        "battery_first_enabled_3": 1108,
+    }
+
+    for key, register in expected.items():
+        assert specs[key].register == register
+        assert specs[key].confidence is Confidence.VERIFIED
+
+
+def test_sph_schedule_enable_registers_are_switches() -> None:
+    specs = {spec.key: spec for spec in for_profile("storage_3000")}
+
+    for key in (
+        "grid_first_enabled_1",
+        "grid_first_enabled_2",
+        "grid_first_enabled_3",
+        "battery_first_enabled_1",
+        "battery_first_enabled_2",
+        "battery_first_enabled_3",
+    ):
+        assert specs[key].kind is WriteKind.SWITCH
+        assert specs[key].encoding is Encoding.BOOL
+
+
 def test_unverified_registers_are_only_offered_when_asked_for() -> None:
     default = {spec.key for spec in for_profile("storage_3000")}
     opted_in = {spec.key for spec in for_profile("storage_3000", include_unverified=True)}
