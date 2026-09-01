@@ -23,14 +23,21 @@ from collections.abc import Callable
 from typing import Any
 
 from growatt_protocol import CommandTimeout, commands
-from growatt_protocol.registers.writable import Encoding, WritableRegister, WriteKind, for_profile
+from growatt_protocol.registers.writable import (
+    BY_KEY,
+    Encoding,
+    WritableRegister,
+    WriteKind,
+    for_profile,
+)
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import KIND_INVERTER, SIGNAL_NEW_DEVICE
+from .const import DOMAIN, KIND_INVERTER, SIGNAL_NEW_DEVICE
 from .entity import GrowattEntity
 from .hub import GrowattDevice, GrowattHub
 from .metadata import pretty
@@ -45,6 +52,21 @@ _SCHEDULE_ENABLE_REGISTERS = {
     1105,
     1108,
 }
+_SCHEDULE_ENABLE_SLOTS = {
+    "grid_first_enabled_1": ("grid_first_start_time_1", "grid_first_stop_time_1"),
+    "grid_first_enabled_2": ("grid_first_start_time_2", "grid_first_stop_time_2"),
+    "grid_first_enabled_3": ("grid_first_start_time_3", "grid_first_stop_time_3"),
+    "battery_first_enabled_1": ("battery_first_start_time", "battery_first_stop_time"),
+    "battery_first_enabled_2": ("battery_first_start_time_2", "battery_first_stop_time_2"),
+    "battery_first_enabled_3": ("battery_first_start_time_3", "battery_first_stop_time_3"),
+}
+_DOMAIN_BY_KIND = {
+    WriteKind.NUMBER: "number",
+    WriteKind.SELECT: "select",
+    WriteKind.SWITCH: "switch",
+    WriteKind.TIME: "time",
+}
+_UNKNOWN_STATES = {"", "unknown", "unavailable"}
 
 _READ_GROUPS = (
     (1070, 1071),
@@ -252,22 +274,61 @@ class GrowattWriteEntity(GrowattEntity):
         3-register slot as one 0x10 write mirrors how the inverter stores these slots.
         """
         start = self.spec.register - 2
-        read = await session.send_command(
-            commands.read_inverter(
-                session.datalogger_serial, session.protocol, start, self.spec.register
+        values: list[int] | None = None
+        try:
+            read = await session.send_command(
+                commands.read_inverter(
+                    session.datalogger_serial, session.protocol, start, self.spec.register
+                )
             )
-        )
-        if read.empty or len(read.values) < 3:
+            if not read.empty and len(read.values) >= 3:
+                values = list(read.values[:3])
+        except (CommandTimeout, ConnectionError) as err:
+            _LOGGER.debug("could not pre-read schedule slot for %s: %s", self.spec.key, err)
+
+        if values is None:
+            values = self._schedule_slot_words_from_state(word)
+        if values is None:
             raise HomeAssistantError(
-                f"Could not read schedule slot {start}-{self.spec.register} before writing "
-                f"{self.spec.key}"
+                f"Could not confirm schedule slot {start}-{self.spec.register} before writing "
+                f"{self.spec.key}; wait for the start/stop time entities to populate and try again"
             )
 
-        values = list(read.values[:3])
         values[2] = word
         return await session.send_command(
             commands.write_inverter_range(session.datalogger_serial, session.protocol, start, values)
         )
+
+    def _schedule_slot_words_from_state(self, word: int) -> list[int] | None:
+        keys = _SCHEDULE_ENABLE_SLOTS.get(self.spec.key)
+        if keys is None:
+            return None
+
+        encoded: list[int] = []
+        for key in keys:
+            state = self._state_for_writable_key(key)
+            if state is None:
+                return None
+            try:
+                encoded.append(BY_KEY[key].encode(state))
+            except (KeyError, ValueError):
+                return None
+        encoded.append(word)
+        return encoded
+
+    def _state_for_writable_key(self, key: str) -> str | None:
+        spec = BY_KEY.get(key)
+        if spec is None:
+            return None
+        domain = _DOMAIN_BY_KIND[spec.kind]
+        unique_id = f"{DOMAIN}_{self.device.key}_{key}"
+        entity_id = er.async_get(self.hass).async_get_entity_id(domain, DOMAIN, unique_id)
+        if entity_id is None:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in _UNKNOWN_STATES:
+            return None
+        return state.state
 
     def _session(self) -> Any:
         parent = self.device.parent
