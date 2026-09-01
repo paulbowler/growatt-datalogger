@@ -36,6 +36,15 @@ from .metadata import pretty
 
 _LOGGER = logging.getLogger(__name__)
 
+_SCHEDULE_ENABLE_REGISTERS = {
+    1082,
+    1085,
+    1088,
+    1102,
+    1105,
+    1108,
+}
+
 
 def async_setup_write_platform(
     hass: HomeAssistant,
@@ -190,11 +199,14 @@ class GrowattWriteEntity(GrowattEntity):
             raise HomeAssistantError(str(err)) from err
 
         try:
-            response = await session.send_command(
-                commands.write_inverter(
-                    session.datalogger_serial, session.protocol, self.spec.register, word
+            if self.spec.register in _SCHEDULE_ENABLE_REGISTERS:
+                response = await self._async_write_schedule_enable(session, word)
+            else:
+                response = await session.send_command(
+                    commands.write_inverter(
+                        session.datalogger_serial, session.protocol, self.spec.register, word
+                    )
                 )
-            )
         except (CommandTimeout, ConnectionError) as err:
             # Deliberately not retried: repeating a write could apply a change twice.
             raise HomeAssistantError(
@@ -209,6 +221,31 @@ class GrowattWriteEntity(GrowattEntity):
 
         self._refresh_gave_empty_response = False
         await self._async_refresh()
+
+    async def _async_write_schedule_enable(self, session: Any, word: int) -> Any:
+        """Write an enable flag together with its start/stop time registers.
+
+        Some SPH firmware rejects changing a schedule slot's enable flag as a lone
+        0x06 write. Preserving the adjacent start/stop words and applying the complete
+        3-register slot as one 0x10 write mirrors how the inverter stores these slots.
+        """
+        start = self.spec.register - 2
+        read = await session.send_command(
+            commands.read_inverter(
+                session.datalogger_serial, session.protocol, start, self.spec.register
+            )
+        )
+        if read.empty or len(read.values) < 3:
+            raise HomeAssistantError(
+                f"Could not read schedule slot {start}-{self.spec.register} before writing "
+                f"{self.spec.key}"
+            )
+
+        values = list(read.values[:3])
+        values[2] = word
+        return await session.send_command(
+            commands.write_inverter_range(session.datalogger_serial, session.protocol, start, values)
+        )
 
     def _session(self) -> Any:
         parent = self.device.parent
