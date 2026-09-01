@@ -86,6 +86,7 @@ class GrowattWriteEntity(GrowattEntity):
         self._attr_entity_registry_enabled_default = spec.enabled_default
         self._current: Any = None
         self._refresh_requested = False
+        self._refresh_gave_empty_response = False
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -134,7 +135,12 @@ class GrowattWriteEntity(GrowattEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         # A record has arrived, so the device is connected and a command can be sent.
-        if not self._refresh_requested and self._reported is None and self._current is None:
+        if (
+            not self._refresh_requested
+            and not self._refresh_gave_empty_response
+            and self._reported is None
+            and self._current is None
+        ):
             self._refresh_requested = True
             self.hass.async_create_background_task(
                 self._async_refresh(),
@@ -146,6 +152,7 @@ class GrowattWriteEntity(GrowattEntity):
         """Read the register back. Leaves the value unknown if it cannot be read."""
         session = self._session()
         if session is None:
+            self._refresh_requested = False
             return
         try:
             response = await session.send_command(
@@ -156,6 +163,8 @@ class GrowattWriteEntity(GrowattEntity):
         except (CommandTimeout, ConnectionError) as err:
             _LOGGER.debug("could not read %s: %s", self.spec.key, err)
             return
+        finally:
+            self._refresh_requested = False
 
         if response.empty or response.value is None:
             # The device does not implement this register. Better an unknown value than
@@ -163,6 +172,7 @@ class GrowattWriteEntity(GrowattEntity):
             _LOGGER.debug(
                 "%s does not implement register %s", self.device.serial, self.spec.register
             )
+            self._refresh_gave_empty_response = True
             return
 
         self._current = self.spec.decode(int(response.value))
@@ -197,6 +207,7 @@ class GrowattWriteEntity(GrowattEntity):
                 f"The inverter rejected {self.spec.key} with result {response.result}"
             )
 
+        self._refresh_gave_empty_response = False
         await self._async_refresh()
 
     def _session(self) -> Any:
