@@ -13,7 +13,13 @@ evaluated lazily, so it costs nothing at import time either.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+_VENDOR = Path(__file__).parent / "vendor"
+if _VENDOR.is_dir() and str(_VENDOR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR))
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
